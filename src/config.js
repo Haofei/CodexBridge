@@ -56,6 +56,7 @@ export function createConfig({ env = process.env, rootDir }) {
       env.CODEX_APPROVAL_POLICY ?? "never",
     ),
     logRequests: readBooleanEnv(env.CODEX_LOG_REQUESTS, false),
+    logMaxTextChars: Number(env.CODEX_LOG_MAX_TEXT_CHARS ?? 4000),
     requireSessionId: readBooleanEnv(env.CODEX_REQUIRE_SESSION_ID, false),
     jsonLimit: env.CODEX_JSON_LIMIT ?? "10mb",
     codexStateDir,

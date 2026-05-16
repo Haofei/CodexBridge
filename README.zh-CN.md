@@ -123,6 +123,10 @@ curl -N http://localhost:8080/v1/chat/completions \
 
 默认均为 `false`。
 
+### 日志
+
+CodexBridge 默认打印轻量对话日志：`chat.input`、`chat.start`、Codex 输出公开 reasoning summary 时的 `chat.thinking`、`chat.output`、以及 `chat.complete` / `chat.error`。`CODEX_LOG_MAX_TEXT_CHARS` 控制单个文本字段的截断长度。只有需要完整 raw payload 和 prompt 排查时，才打开 `CODEX_LOG_REQUESTS=true`。
+
 ## 源码部署
 
 ```bash
@@ -185,7 +189,8 @@ docker run --rm -p 8080:8080 \
 | `CODEX_NETWORK_ACCESS` | `false` | 允许 Codex 联网 |
 | `CODEX_WEB_SEARCH` | `false` | 允许 Codex 使用 Web 搜索 |
 | `CODEX_APPROVAL_POLICY` | `never` | `never` / `on-request` / `on-failure` / `untrusted` |
-| `CODEX_LOG_REQUESTS` | `false` | 打印请求 payload 以便调试 |
+| `CODEX_LOG_REQUESTS` | `false` | 打印完整请求 payload 和 Codex prompt，用于深度调试 |
+| `CODEX_LOG_MAX_TEXT_CHARS` | `4000` | 每个对话/thinking 文本字段的最大日志字符数 |
 | `CODEX_REQUIRE_SESSION_ID` | `false` | `true` 时缺少 session ID 会直接返回 400 |
 | `CODEX_JSON_LIMIT` | `10mb` | `express.json()` 请求体上限 |
 

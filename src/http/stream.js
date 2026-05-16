@@ -18,6 +18,10 @@ export async function handleStreamResponse({
   toolContext = { enabled: false },
   persistThreadIdIfNeeded,
   extractAssistantResponse,
+  onComplete,
+  onError,
+  onThinking,
+  onTextDelta,
 }) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -69,6 +73,9 @@ export async function handleStreamResponse({
         toolContext,
         extractAssistantResponse,
       );
+      if (typeof onThinking === "function") {
+        onThinking(turn?.items);
+      }
       sendDelta({ role: "assistant" });
       if (Array.isArray(choice.message.tool_calls)) {
         sendDelta({
@@ -85,6 +92,18 @@ export async function handleStreamResponse({
         sendDelta({ content: choice.message.content });
       }
       sendDelta({}, choice.finishReason, usage);
+      if (typeof onComplete === "function") {
+        onComplete({
+          finishReason: choice.finishReason,
+          toolCallCount: Array.isArray(choice.message.tool_calls)
+            ? choice.message.tool_calls.length
+            : choice.message.function_call
+              ? 1
+              : 0,
+          usage,
+          message: choice.message,
+        });
+      }
       sendDone();
       res.end();
       return;
@@ -103,6 +122,13 @@ export async function handleStreamResponse({
       if (event?.type === "turn.failed") {
         throw new Error(event?.error?.message ?? "Codex turn failed.");
       }
+      if (
+        event?.type === "item.completed" &&
+        event?.item?.type === "reasoning" &&
+        typeof onThinking === "function"
+      ) {
+        onThinking([event.item]);
+      }
 
       const text = extractAgentMessageText(event);
       if (typeof text === "string") {
@@ -113,6 +139,9 @@ export async function handleStreamResponse({
         if (text.length > bufferedText.length) {
           const deltaContent = text.slice(bufferedText.length);
           bufferedText = text;
+          if (typeof onTextDelta === "function") {
+            onTextDelta(deltaContent);
+          }
           sendDelta({ content: deltaContent });
         }
       }
@@ -122,10 +151,24 @@ export async function handleStreamResponse({
       await persistThreadIdIfNeeded(sessionId, thread);
     }
     sendDelta({}, "stop", usage);
+    if (typeof onComplete === "function") {
+      onComplete({
+        finishReason: "stop",
+        toolCallCount: 0,
+        usage,
+        message: {
+          role: "assistant",
+          content: bufferedText,
+        },
+      });
+    }
     sendDone();
     res.end();
   } catch (error) {
     console.error("Codex stream failed:", error);
+    if (typeof onError === "function") {
+      onError(error);
+    }
     sendChunk({
       ...chunkBase,
       choices: [

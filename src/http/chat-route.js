@@ -27,7 +27,16 @@ import {
   resolveToolContext,
 } from "../chat/tools.js";
 import { resolveModelAndReasoning } from "../models.js";
-import { logIncomingRequest, logRunPayload } from "./logging.js";
+import {
+  createChatStreamLogger,
+  logChatComplete,
+  logChatError,
+  logChatExchange,
+  logChatStart,
+  logThinkingItems,
+  logIncomingRequest,
+  logRunPayload,
+} from "./logging.js";
 import { resolveSessionId } from "./session.js";
 import { handleStreamResponse } from "./stream.js";
 
@@ -40,6 +49,7 @@ export function createChatRouter({
 
   router.post("/v1/chat/completions", async (req, res) => {
     const { messages, model, reasoning_effort, stream } = req.body ?? {};
+    const requestId = `chatreq_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
 
     if (config.logRequests) {
       logIncomingRequest(req.body);
@@ -175,8 +185,25 @@ export function createChatRouter({
       threadOptions,
     );
     const { thread } = threadRecord;
+    const requestStartedAt = Date.now();
+
+    logChatStart({
+      requestId,
+      sessionId,
+      sessionProvided,
+      stream,
+      messageCount: messages.length,
+      threadOptions,
+      toolContext,
+      outputSchema,
+    });
 
     if (stream) {
+      const streamLogger = createChatStreamLogger({
+        messages: normalizedMessages,
+        maxTextChars: config.logMaxTextChars,
+      });
+      streamLogger.start();
       if (config.logRequests) {
         logRunPayload(
           "runStreamed payload",
@@ -203,6 +230,38 @@ export function createChatRouter({
         toolContext,
         persistThreadIdIfNeeded: threadStore.persistThreadIdIfNeeded,
         extractAssistantResponse,
+        onTextDelta: (delta) => {
+          streamLogger.writeDelta(delta);
+        },
+        onComplete: (result) => {
+          if (toolContext.enabled) {
+            streamLogger.writeMessage(result.message);
+          }
+          streamLogger.close();
+          logChatComplete({
+            requestId,
+            sessionId,
+            durationMs: Date.now() - requestStartedAt,
+            ...result,
+          });
+        },
+        onError: (error) => {
+          streamLogger.close();
+          logChatError({
+            requestId,
+            sessionId,
+            durationMs: Date.now() - requestStartedAt,
+            error,
+          });
+        },
+        onThinking: (items) => {
+          logThinkingItems({
+            requestId,
+            sessionId,
+            items,
+            maxTextChars: config.logMaxTextChars,
+          });
+        },
       });
       return;
     }
@@ -237,6 +296,29 @@ export function createChatRouter({
             },
             finishReason: "stop",
           };
+      logThinkingItems({
+        requestId,
+        sessionId,
+        items: turn?.items,
+        maxTextChars: config.logMaxTextChars,
+      });
+      logChatExchange({
+        messages: normalizedMessages,
+        message: assistantChoice.message,
+        maxTextChars: config.logMaxTextChars,
+      });
+      logChatComplete({
+        requestId,
+        sessionId,
+        durationMs: Date.now() - requestStartedAt,
+        finishReason: assistantChoice.finishReason,
+        toolCallCount: Array.isArray(assistantChoice.message.tool_calls)
+          ? assistantChoice.message.tool_calls.length
+          : assistantChoice.message.function_call
+            ? 1
+            : 0,
+        usage,
+      });
 
       return res.json({
         id: `chatcmpl-${thread.id ?? crypto.randomUUID()}`,
@@ -254,6 +336,12 @@ export function createChatRouter({
       });
     } catch (error) {
       console.error("Codex run failed:", error);
+      logChatError({
+        requestId,
+        sessionId,
+        durationMs: Date.now() - requestStartedAt,
+        error,
+      });
       return res.status(500).json({
         error: {
           message: error?.message ?? "Codex execution failed.",

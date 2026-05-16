@@ -127,6 +127,10 @@ CodexBridge forwards OpenAI `response_format` to Codex `outputSchema`:
 
 Both default to `false`.
 
+### Logging
+
+CodexBridge logs concise conversation events by default: `chat.input`, `chat.start`, optional `chat.thinking` when Codex emits public reasoning summaries, `chat.output`, and `chat.complete` / `chat.error`. `CODEX_LOG_MAX_TEXT_CHARS` controls transcript truncation. Set `CODEX_LOG_REQUESTS=true` only when you need full raw payload and prompt dumps for deep debugging.
+
 ## Source deployment
 
 ```bash
@@ -193,7 +197,8 @@ docker run --rm -p 8080:8080 \
 | `CODEX_NETWORK_ACCESS` | `false` | Allow networked commands |
 | `CODEX_WEB_SEARCH` | `false` | Allow built-in web search |
 | `CODEX_APPROVAL_POLICY` | `never` | `never` / `on-request` / `on-failure` / `untrusted` |
-| `CODEX_LOG_REQUESTS` | `false` | Log incoming payloads |
+| `CODEX_LOG_REQUESTS` | `false` | Log full incoming payloads and Codex prompts for deep debugging |
+| `CODEX_LOG_MAX_TEXT_CHARS` | `4000` | Maximum characters per logged conversation/thinking text field |
 | `CODEX_REQUIRE_SESSION_ID` | `false` | Require session identifiers (`true` recommended for production) |
 | `CODEX_JSON_LIMIT` | `10mb` | `express.json()` body limit |
 
