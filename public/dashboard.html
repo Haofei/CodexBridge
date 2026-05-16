@@ -240,8 +240,7 @@
           renderTokens(data.tokens);
         } catch (error) {
           console.error(error);
-          elements.tokenList.innerHTML =
-            '<div class="empty">无法加载仪表盘数据，请查看日志。</div>';
+          setEmptyState(elements.tokenList, "无法加载仪表盘数据，请查看日志。");
         } finally {
           elements.refreshBtn.disabled = false;
         }
@@ -275,86 +274,80 @@
         elements.accountCard.querySelector(".badge").className = badgeClass;
         elements.accountCard.querySelector(".badge").textContent = statusText;
 
-        elements.accountInfo.innerHTML = `
-          <div>
-            <span>邮箱</span>
-            <strong>${account.email ?? "n/a"}</strong>
-          </div>
-          <div>
-            <span>账号 ID</span>
-            <strong>${account.accountId ?? "n/a"}</strong>
-          </div>
-          <div>
-            <span>设备</span>
-            <strong>${account.device ?? "n/a"}</strong>
-          </div>
-          <div>
-            <span>签发时间</span>
-            <strong>${formatDate(account.issuedAt)}</strong>
-          </div>
-          <div>
-            <span>过期时间</span>
-            <strong>${formatDate(account.expiresAt)}</strong>
-          </div>
-        `;
+        elements.accountInfo.replaceChildren(
+          createInfoField("邮箱", account.email ?? "n/a"),
+          createInfoField("账号 ID", account.accountId ?? "n/a"),
+          createInfoField("设备", account.device ?? "n/a"),
+          createInfoField("签发时间", formatDate(account.issuedAt)),
+          createInfoField("过期时间", formatDate(account.expiresAt)),
+        );
       }
 
       function renderTokens(tokens = []) {
         if (!tokens.length) {
-          elements.tokenList.innerHTML =
-            '<div class="empty">没有令牌元数据。请通过 Codex CLI 登录以同步信息。</div>';
+          setEmptyState(elements.tokenList, "没有令牌元数据。请通过 Codex CLI 登录以同步信息。");
           return;
         }
-        elements.tokenList.innerHTML = tokens
-          .map((token) => {
-            const badge =
-              token.status === "expired" ? "badge badge-danger" : "badge badge-success";
-            const badgeText =
-              token.status === "expired"
-                ? "已过期"
-                : token.status === "active"
-                  ? "正常"
-                  : token.status ?? "未知";
-            const label = `${token.type ?? "令牌"}${
-              token.email ? " · " + token.email : ""
-            }`;
-            return `
-            <div class="token-card">
-              <div class="token-header">
-                <div class="token-email">${label}</div>
-                <div class="${badge}">${badgeText}</div>
-              </div>
-              <div class="token-info">
-                <div>
-                  <span>签发时间</span>
-                  <strong>${formatDate(token.issuedAt)}</strong>
-                </div>
-                <div>
-                  <span>过期时间</span>
-                  <strong>${formatDate(token.expiresAt)}</strong>
-                </div>
-                <div>
-                  <span>权限/Scope</span>
-                  <strong>${token.scopes ?? "默认"}</strong>
-                </div>
-                <div>
-                  <span>预览</span>
-                  <strong>${token.preview ?? "n/a"}</strong>
-                </div>
-                ${
-                  token.issuer
-                    ? `<div><span>Issuer</span><strong>${token.issuer}</strong></div>`
-                    : ""
-                }
-                ${
-                  token.audience
-                    ? `<div><span>Audience</span><strong>${token.audience}</strong></div>`
-                    : ""
-                }
-              </div>
-            </div>`;
-          })
-          .join("");
+        elements.tokenList.replaceChildren(...tokens.map(createTokenCard));
+      }
+
+      function createTokenCard(token) {
+        const badgeClass =
+          token.status === "expired" ? "badge badge-danger" : "badge badge-success";
+        const badgeText =
+          token.status === "expired"
+            ? "已过期"
+            : token.status === "active"
+              ? "正常"
+              : token.status ?? "未知";
+        const label = `${token.type ?? "令牌"}${
+          token.email ? " · " + token.email : ""
+        }`;
+
+        const card = document.createElement("div");
+        card.className = "token-card";
+
+        const header = document.createElement("div");
+        header.className = "token-header";
+        const email = document.createElement("div");
+        email.className = "token-email";
+        email.textContent = label;
+        const badge = document.createElement("div");
+        badge.className = badgeClass;
+        badge.textContent = badgeText;
+        header.replaceChildren(email, badge);
+
+        const info = document.createElement("div");
+        info.className = "token-info";
+        const fields = [
+          createInfoField("签发时间", formatDate(token.issuedAt)),
+          createInfoField("过期时间", formatDate(token.expiresAt)),
+          createInfoField("权限/Scope", token.scopes ?? "默认"),
+          createInfoField("预览", token.preview ?? "n/a"),
+        ];
+        if (token.issuer) fields.push(createInfoField("Issuer", token.issuer));
+        if (token.audience) fields.push(createInfoField("Audience", token.audience));
+        info.replaceChildren(...fields);
+
+        card.replaceChildren(header, info);
+        return card;
+      }
+
+      function createInfoField(label, value) {
+        const field = document.createElement("div");
+        const caption = document.createElement("span");
+        caption.textContent = label;
+        const content = document.createElement("strong");
+        content.textContent = value;
+        field.replaceChildren(caption, content);
+        return field;
+      }
+
+      function setEmptyState(target, message) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = message;
+        target.replaceChildren(empty);
       }
 
       function formatDate(value) {
