@@ -255,17 +255,37 @@ app.post("/v1/chat/completions", async (req, res) => {
     });
   }
 
+  let toolContext;
+  try {
+    toolContext = resolveToolContext(req.body);
+  } catch (error) {
+    return res.status(400).json({
+      error: {
+        message: error?.message ?? "Invalid tools definition.",
+        type: "invalid_request_error",
+      },
+    });
+  }
+
+  const hasToolProtocolMessages = normalizedMessages.some((entry) =>
+    isToolProtocolMessage(entry),
+  );
+  const usesToolProtocol = toolContext.enabled || hasToolProtocolMessages;
   const latestUserPrompt = extractLatestUserContent(normalizedMessages);
   const latestUserInputs = extractLatestUserInputs(normalizedMessages);
   const conversationPrompt = buildConversationPrompt(normalizedMessages);
   const conversationInputs = buildConversationInputs(normalizedMessages);
   const systemPrompt = buildSystemPrompt(normalizedMessages);
-  const finalPrompt = sessionProvided
-    ? mergePrompts(systemPrompt, latestUserPrompt)
-    : conversationPrompt;
-  const finalStructuredPrompt = sessionProvided
-    ? mergeStructuredPrompts(systemPrompt, latestUserInputs)
-    : conversationInputs;
+  const finalPrompt = usesToolProtocol
+    ? conversationPrompt
+    : sessionProvided
+      ? mergePrompts(systemPrompt, latestUserPrompt)
+      : conversationPrompt;
+  const finalStructuredPrompt = usesToolProtocol
+    ? conversationInputs
+    : sessionProvided
+      ? mergeStructuredPrompts(systemPrompt, latestUserInputs)
+      : conversationInputs;
   if (
     !finalPrompt &&
     (!finalStructuredPrompt || finalStructuredPrompt.length === 0)
@@ -277,9 +297,16 @@ app.post("/v1/chat/completions", async (req, res) => {
       },
     });
   }
-  const codexInput = finalStructuredPrompt ?? finalPrompt;
+  const baseCodexInput = finalStructuredPrompt ?? finalPrompt;
+  const codexInput = toolContext.enabled
+    ? prependToolInstructions(baseCodexInput, toolContext)
+    : baseCodexInput;
   const turnOptions = {};
-  if (outputSchema) turnOptions.outputSchema = outputSchema;
+  if (toolContext.enabled) {
+    turnOptions.outputSchema = buildToolDecisionSchema(toolContext);
+  } else if (outputSchema) {
+    turnOptions.outputSchema = outputSchema;
+  }
   const attachmentCleanups = collectAttachmentCleanups(normalizedMessages);
   const { resolvedModel, resolvedReasoning } = resolveModelAndReasoning({
     model: model ?? DEFAULT_MODEL,
@@ -317,8 +344,12 @@ app.post("/v1/chat/completions", async (req, res) => {
             webSearchEnabled: threadOptions.webSearchEnabled,
             approvalPolicy: threadOptions.approvalPolicy,
             prompt: codexInput,
-            response_format: outputSchema ? "json_schema" : "text",
-            output_schema: outputSchema,
+            response_format: toolContext.enabled
+              ? "tool_calling"
+              : outputSchema
+                ? "json_schema"
+                : "text",
+            output_schema: turnOptions.outputSchema,
             ephemeral: !sessionProvided,
           },
           null,
@@ -335,6 +366,7 @@ app.post("/v1/chat/completions", async (req, res) => {
       shouldPersist: sessionProvided,
       turnOptions,
       cleanupTasks: attachmentCleanups,
+      toolContext,
     });
     return;
   }
@@ -354,8 +386,12 @@ app.post("/v1/chat/completions", async (req, res) => {
             webSearchEnabled: threadOptions.webSearchEnabled,
             approvalPolicy: threadOptions.approvalPolicy,
             prompt: codexInput,
-            response_format: outputSchema ? "json_schema" : "text",
-            output_schema: outputSchema,
+            response_format: toolContext.enabled
+              ? "tool_calling"
+              : outputSchema
+                ? "json_schema"
+                : "text",
+            output_schema: turnOptions.outputSchema,
             ephemeral: !sessionProvided,
           },
           null,
@@ -369,6 +405,15 @@ app.post("/v1/chat/completions", async (req, res) => {
     }
 
     const usage = formatUsage(turn?.usage);
+    const assistantChoice = toolContext.enabled
+      ? buildToolAwareChoice(turn, toolContext)
+      : {
+          message: {
+            role: "assistant",
+            content: extractAssistantResponse(turn),
+          },
+          finishReason: "stop",
+        };
 
     return res.json({
       id: `chatcmpl-${thread.id ?? crypto.randomUUID()}`,
@@ -378,11 +423,8 @@ app.post("/v1/chat/completions", async (req, res) => {
       choices: [
         {
           index: 0,
-          message: {
-            role: "assistant",
-            content: extractAssistantResponse(turn),
-          },
-          finish_reason: "stop",
+          message: assistantChoice.message,
+          finish_reason: assistantChoice.finishReason,
         },
       ],
       usage,
@@ -432,8 +474,9 @@ function buildConversationPrompt(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return null;
   const lines = [];
   for (const entry of messages) {
-    if (!entry?.role || !entry?.text) continue;
-    lines.push(`[${entry.role.toUpperCase()}]\n${entry.text}`.trim());
+    const text = renderMessagePromptText(entry);
+    if (!entry?.role || !text) continue;
+    lines.push(`${renderMessageLabel(entry)}\n${text}`.trim());
   }
   return lines.length ? lines.join("\n\n") : null;
 }
@@ -443,12 +486,13 @@ function buildConversationInputs(messages) {
   const inputs = [];
   for (const entry of messages) {
     if (!entry?.role) continue;
-    const label = `[${entry.role.toUpperCase()}]`;
+    const label = renderMessageLabel(entry);
     let prefixed = false;
-    if (entry.text) {
+    const text = renderMessagePromptText(entry);
+    if (text) {
       inputs.push({
         type: "text",
-        text: `${label}\n${entry.text}`.trim(),
+        text: `${label}\n${text}`.trim(),
       });
       prefixed = true;
     }
@@ -465,6 +509,36 @@ function buildConversationInputs(messages) {
     }
   }
   return inputs.length ? inputs : null;
+}
+
+function renderMessageLabel(entry) {
+  const role = entry?.role ? String(entry.role).toUpperCase() : "MESSAGE";
+  const attrs = [];
+  if (entry?.name) attrs.push(`name=${entry.name}`);
+  if (entry?.toolCallId) attrs.push(`tool_call_id=${entry.toolCallId}`);
+  return attrs.length ? `[${role} ${attrs.join(" ")}]` : `[${role}]`;
+}
+
+function renderMessagePromptText(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  const blocks = [];
+  if (entry.text) blocks.push(entry.text);
+  if (Array.isArray(entry.toolCalls) && entry.toolCalls.length > 0) {
+    blocks.push(`tool_calls: ${JSON.stringify(entry.toolCalls)}`);
+  }
+  if (entry.functionCall) {
+    blocks.push(`function_call: ${JSON.stringify(entry.functionCall)}`);
+  }
+  return blocks.length ? blocks.join("\n") : null;
+}
+
+function isToolProtocolMessage(entry) {
+  return (
+    entry?.role === "tool" ||
+    Boolean(entry?.toolCallId) ||
+    Boolean(entry?.functionCall) ||
+    (Array.isArray(entry?.toolCalls) && entry.toolCalls.length > 0)
+  );
 }
 
 function extractLatestUserContent(messages) {
@@ -675,6 +749,277 @@ function resolveOutputSchemaFromBody(body) {
   return null;
 }
 
+function resolveToolContext(body) {
+  if (!body || typeof body !== "object") {
+    return {
+      enabled: false,
+      tools: [],
+      mode: "auto",
+      forcedName: null,
+      legacy: false,
+    };
+  }
+
+  const rawTools = Array.isArray(body.tools) ? body.tools : [];
+  const rawFunctions = Array.isArray(body.functions) ? body.functions : [];
+  const tools = [];
+  for (const rawTool of rawTools) {
+    tools.push(normalizeRequestTool(rawTool));
+  }
+  for (const rawFunction of rawFunctions) {
+    tools.push(normalizeRequestTool({ type: "function", function: rawFunction }));
+  }
+
+  const dedupedTools = [];
+  const seenNames = new Set();
+  for (const tool of tools) {
+    const name = tool.function.name;
+    if (seenNames.has(name)) {
+      throw new Error(`Duplicate tool/function name "${name}".`);
+    }
+    seenNames.add(name);
+    dedupedTools.push(tool);
+  }
+
+  const legacy = rawTools.length === 0 && rawFunctions.length > 0;
+  const choice = normalizeToolChoice(
+    body.tool_choice ?? body.toolChoice,
+    body.function_call ?? body.functionCall,
+    legacy,
+  );
+  if (choice.forcedName && !seenNames.has(choice.forcedName)) {
+    throw new Error(`tool_choice references unknown function "${choice.forcedName}".`);
+  }
+
+  return {
+    enabled: dedupedTools.length > 0,
+    tools: dedupedTools,
+    mode: choice.mode,
+    forcedName: choice.forcedName,
+    legacy,
+  };
+}
+
+function normalizeRequestTool(rawTool) {
+  if (!rawTool || typeof rawTool !== "object") {
+    throw new Error("Each tool must be an object.");
+  }
+  if (rawTool.type && rawTool.type !== "function") {
+    throw new Error(`Unsupported tool type "${rawTool.type}".`);
+  }
+  const fn = rawTool.function;
+  if (!fn || typeof fn !== "object") {
+    throw new Error("Each tool must include a function definition.");
+  }
+  if (typeof fn.name !== "string" || !fn.name.trim()) {
+    throw new Error("Each function tool must include a non-empty name.");
+  }
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(fn.name)) {
+    throw new Error(
+      `Function name "${fn.name}" must match /^[a-zA-Z0-9_-]{1,64}$/.`,
+    );
+  }
+  const parameters =
+    fn.parameters === undefined
+      ? { type: "object", properties: {}, additionalProperties: true }
+      : ensureJsonSchemaObject(fn.parameters, `parameters for function "${fn.name}"`);
+  return {
+    type: "function",
+    function: {
+      name: fn.name,
+      description: typeof fn.description === "string" ? fn.description : "",
+      parameters,
+    },
+  };
+}
+
+function normalizeToolChoice(toolChoice, functionCall, legacy) {
+  const candidate = legacy && functionCall !== undefined ? functionCall : toolChoice;
+  if (candidate === undefined || candidate === null) {
+    return { mode: "auto", forcedName: null };
+  }
+  if (typeof candidate === "string") {
+    const normalized = candidate.toLowerCase();
+    if (["auto", "none", "required"].includes(normalized)) {
+      return { mode: normalized, forcedName: null };
+    }
+    throw new Error(`Unsupported tool_choice "${candidate}".`);
+  }
+  if (!isPlainObject(candidate)) {
+    throw new Error("tool_choice must be a string or object.");
+  }
+  if (legacy && typeof candidate.name === "string") {
+    return { mode: "required", forcedName: candidate.name };
+  }
+  const forcedName =
+    typeof candidate.function?.name === "string"
+      ? candidate.function.name
+      : typeof candidate.name === "string"
+        ? candidate.name
+        : null;
+  if (forcedName) {
+    return { mode: "required", forcedName };
+  }
+  throw new Error("Unsupported tool_choice object.");
+}
+
+function prependToolInstructions(input, toolContext) {
+  const instructions = buildToolInstructions(toolContext);
+  if (Array.isArray(input)) {
+    return [{ type: "text", text: instructions }, ...input];
+  }
+  return `${instructions}\n\n${input}`;
+}
+
+function buildToolInstructions(toolContext) {
+  const toolSpecs = toolContext.tools.map((tool) => ({
+    name: tool.function.name,
+    description: tool.function.description,
+    parameters: tool.function.parameters,
+  }));
+  const choiceText = toolContext.forcedName
+    ? `You must request the "${toolContext.forcedName}" tool.`
+    : toolContext.mode === "required"
+      ? "You must request at least one tool."
+      : toolContext.mode === "none"
+        ? "You must not request tools; answer directly."
+        : "Request tools only when they are needed. Answer directly when no tool is needed.";
+
+  return [
+    "You are operating behind an OpenAI Chat Completions tool-calling compatibility layer.",
+    "You cannot execute these client tools yourself. If a tool is needed, request it and wait for the client to send role=tool results in a later request.",
+    choiceText,
+    "Return only JSON matching the provided schema.",
+    "For a direct answer, return {\"type\":\"final\",\"content\":\"...\",\"tool_calls\":[]}.",
+    "For tool requests, return {\"type\":\"tool_calls\",\"content\":\"\",\"tool_calls\":[{\"name\":\"tool_name\",\"arguments\":\"{...}\"}]}.",
+    "Tool arguments must be a JSON string encoding an object that should match the tool's parameters schema.",
+    `Available tools: ${JSON.stringify(toolSpecs)}`,
+  ].join("\n");
+}
+
+function buildToolDecisionSchema(toolContext) {
+  const allowedNames = toolContext.forcedName
+    ? [toolContext.forcedName]
+    : toolContext.tools.map((tool) => tool.function.name);
+  const allowedTypes =
+    toolContext.mode === "none"
+      ? ["final"]
+      : toolContext.mode === "required" || toolContext.forcedName
+        ? ["tool_calls"]
+        : ["final", "tool_calls"];
+  return {
+    type: "object",
+    properties: {
+      type: { type: "string", enum: allowedTypes },
+      content: { type: "string" },
+      tool_calls: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string", enum: allowedNames },
+            arguments: {
+              type: "string",
+            },
+          },
+          required: ["name", "arguments"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["type", "content", "tool_calls"],
+    additionalProperties: false,
+  };
+}
+
+function buildToolAwareChoice(turn, toolContext) {
+  const parsed = parseToolDecision(extractAssistantResponse(turn));
+  if (
+    parsed?.type === "tool_calls" &&
+    Array.isArray(parsed.tool_calls) &&
+    parsed.tool_calls.length > 0
+  ) {
+    const calls = parsed.tool_calls
+      .map((call) => formatToolCall(call, toolContext))
+      .filter(Boolean);
+    if (calls.length > 0) {
+      if (toolContext.legacy) {
+        return {
+          message: {
+            role: "assistant",
+            content: null,
+            function_call: calls[0].function,
+          },
+          finishReason: "function_call",
+        };
+      }
+      return {
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: calls,
+        },
+        finishReason: "tool_calls",
+      };
+    }
+  }
+
+  return {
+    message: {
+      role: "assistant",
+      content:
+        typeof parsed?.content === "string"
+          ? parsed.content
+          : extractAssistantResponse(turn),
+    },
+    finishReason: "stop",
+  };
+}
+
+function parseToolDecision(text) {
+  if (typeof text !== "string" || !text.trim()) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    try {
+      return JSON.parse(match[0]);
+    } catch {
+      return null;
+    }
+  }
+}
+
+function formatToolCall(call, toolContext) {
+  if (!call || typeof call !== "object") return null;
+  const name = typeof call.name === "string" ? call.name : null;
+  if (!name || !toolContext.tools.some((tool) => tool.function.name === name)) {
+    return null;
+  }
+  const args =
+    typeof call.arguments === "string"
+      ? normalizeJsonArgumentsString(call.arguments)
+      : JSON.stringify(isPlainObject(call.arguments) ? call.arguments : {});
+  return {
+    id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+    type: "function",
+    function: {
+      name,
+      arguments: args,
+    },
+  };
+}
+
+function normalizeJsonArgumentsString(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return JSON.stringify(isPlainObject(parsed) ? parsed : {});
+  } catch {
+    return "{}";
+  }
+}
+
 function ensureJsonSchemaObject(candidate, label = "output schema") {
   if (!isPlainObject(candidate)) {
     throw new Error(`${label} must be a JSON object.`);
@@ -704,17 +1049,73 @@ async function normalizeMessageEntry(entry, index) {
     typeof entry.role === "string" ? entry.role.trim().toLowerCase() : null;
   const text = extractTextContent(entry);
   const attachments = await extractImageAttachments(entry, index);
-  return { role, text, attachments };
+  const name = typeof entry.name === "string" ? entry.name : null;
+  const toolCallId =
+    typeof entry.tool_call_id === "string" ? entry.tool_call_id : null;
+  const toolCalls = normalizeMessageToolCalls(entry.tool_calls);
+  const functionCall = normalizeMessageFunctionCall(entry.function_call);
+  return {
+    role,
+    text,
+    attachments,
+    name,
+    toolCallId,
+    toolCalls,
+    functionCall,
+  };
 }
 
 function extractTextContent(entry) {
   if (typeof entry?.content === "string") return entry.content;
+  if (entry?.content === null && entry?.role === "assistant") return null;
   if (!Array.isArray(entry?.content)) return null;
   const textBlocks = entry.content
     .filter((block) => block?.type === "text" && block?.text)
     .map((block) => block.text);
   if (textBlocks.length === 0) return null;
   return textBlocks.join("\n");
+}
+
+function normalizeMessageToolCalls(toolCalls) {
+  if (!Array.isArray(toolCalls)) return [];
+  const normalized = [];
+  for (const call of toolCalls) {
+    if (!call || typeof call !== "object") continue;
+    const name =
+      typeof call.function?.name === "string" ? call.function.name : null;
+    if (!name) continue;
+    normalized.push({
+      id:
+        typeof call.id === "string" && call.id
+          ? call.id
+          : `call_${crypto.randomUUID().replace(/-/g, "")}`,
+      type: "function",
+      function: {
+        name,
+        arguments:
+          typeof call.function?.arguments === "string"
+            ? call.function.arguments
+            : JSON.stringify(call.function?.arguments ?? {}),
+      },
+    });
+  }
+  return normalized;
+}
+
+function normalizeMessageFunctionCall(functionCall) {
+  if (!functionCall || typeof functionCall !== "object") return null;
+  const name =
+    typeof functionCall.name === "string" && functionCall.name
+      ? functionCall.name
+      : null;
+  if (!name) return null;
+  return {
+    name,
+    arguments:
+      typeof functionCall.arguments === "string"
+        ? functionCall.arguments
+        : JSON.stringify(functionCall.arguments ?? {}),
+  };
 }
 
 async function extractImageAttachments(entry, index) {
@@ -1116,6 +1517,7 @@ async function handleStreamResponse({
   shouldPersist = true,
   turnOptions = {},
   cleanupTasks = [],
+  toolContext = { enabled: false },
 }) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -1156,6 +1558,34 @@ async function handleStreamResponse({
   };
 
   try {
+    if (toolContext.enabled) {
+      const turn = await thread.run(prompt, turnOptions);
+      if (shouldPersist) {
+        await persistThreadIdIfNeeded(sessionId, thread);
+      }
+      const usage = formatUsage(turn?.usage);
+      const choice = buildToolAwareChoice(turn, toolContext);
+      sendDelta({ role: "assistant" });
+      if (Array.isArray(choice.message.tool_calls)) {
+        sendDelta({
+          tool_calls: choice.message.tool_calls.map((call, index) => ({
+            index,
+            id: call.id,
+            type: call.type,
+            function: call.function,
+          })),
+        });
+      } else if (choice.message.function_call) {
+        sendDelta({ function_call: choice.message.function_call });
+      } else if (choice.message.content) {
+        sendDelta({ content: choice.message.content });
+      }
+      sendDelta({}, choice.finishReason, usage);
+      sendDone();
+      res.end();
+      return;
+    }
+
     const streamed = await thread.runStreamed(prompt, turnOptions);
     let bufferedText = "";
     let roleSent = false;
