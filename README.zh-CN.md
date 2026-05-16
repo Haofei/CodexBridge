@@ -59,7 +59,7 @@ npm run codex:server
 curl http://localhost:8080/v1/chat/completions \
   -H "content-type: application/json" \
   -H "authorization: Bearer 123321" \
-  -d '{"model":"gpt-5-codex:medium","session_id":"demo","messages":[{"role":"user","content":"ls"}]}'
+  -d '{"model":"gpt-5.5:medium","session_id":"demo","messages":[{"role":"user","content":"ls"}]}'
 ```
 
 ### session_id 与会话持久化
@@ -75,7 +75,7 @@ curl http://localhost:8080/v1/chat/completions \
 curl -N http://localhost:8080/v1/chat/completions \
   -H "content-type: application/json" \
   -H "authorization: Bearer 123321" \
-  -d '{"model":"gpt-5-codex:high","session_id":"stream","stream":true,"messages":[{"role":"user","content":"一步步介绍如何使用 npm init 创建项目"}]}'
+  -d '{"model":"gpt-5.5:high","session_id":"stream","stream":true,"messages":[{"role":"user","content":"一步步介绍如何使用 npm init 创建项目"}]}'
 ```
 
 ### 多模态输入
@@ -91,7 +91,7 @@ curl -N http://localhost:8080/v1/chat/completions \
 
 ```json
 {
-  "model": "gpt-5-codex",
+  "model": "gpt-5.5",
   "session_id": "lint",
   "response_format": {
     "type": "json_schema",
@@ -175,8 +175,9 @@ docker run --rm -p 8080:8080 \
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP 端口 |
-| `CODEX_MODEL` | `gpt-5-codex` | 默认模型 |
-| `CODEX_REASONING` | `medium` | 默认推理等级 (`low` / `medium` / `high`) |
+| `CODEX_MODEL` | `gpt-5.5` | 默认模型 |
+| `CODEX_REASONING` | `medium` | 默认推理等级 (`minimal` / `low` / `medium` / `high` / `xhigh`) |
+| `CODEX_PATH` | 空 | 可选：指定 Codex CLI 可执行文件路径 |
 | `CODEX_BRIDGE_API_KEY` | `123321` | API key（`Authorization: Bearer` / `x-api-key`） |
 | `CODEX_SKIP_GIT_CHECK` | `true` | 是否跳过 Codex “受信任 Git 仓库”检查 |
 | `CODEX_SANDBOX_MODE` | `read-only` | `read-only` / `workspace-write` / `danger-full-access` |

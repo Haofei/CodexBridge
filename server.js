@@ -11,7 +11,7 @@ import { Codex } from "@openai/codex-sdk";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const DEFAULT_MODEL = process.env.CODEX_MODEL ?? "gpt-5-codex";
+const DEFAULT_MODEL = process.env.CODEX_MODEL ?? "gpt-5.5";
 const DEFAULT_REASONING =
   process.env.CODEX_REASONING ??
   process.env.CODEX_MODEL_REASONING ??
@@ -50,8 +50,22 @@ const CODEX_STATE_DIR =
 const CODEX_AUTH_FILE =
   process.env.CODEX_AUTH_FILE ?? path.join(CODEX_STATE_DIR, "auth.json");
 const APP_VERSION = process.env.npm_package_version ?? "dev";
+const CODEX_PATH_OVERRIDE =
+  process.env.CODEX_PATH ?? process.env.CODEX_PATH_OVERRIDE ?? null;
 
 const MODEL_PRESETS = [
+  {
+    id: "gpt-5.5",
+    label: "GPT-5.5",
+    description: "当前 Codex CLI 默认模型，适合 ChatGPT 账号下的本地 Codex 工作流。",
+    reasonings: [
+      { level: "low", label: "Low", description: "响应最快，适合简单问答与轻量编辑。" },
+      { level: "medium", label: "Medium", description: "推理深度与速度折中（默认）。" },
+      { level: "high", label: "High", description: "更深推理，适合复杂修改。" },
+      { level: "xhigh", label: "XHigh", description: "最高推理深度，适合疑难任务。" },
+    ],
+    defaultReasoning: "medium",
+  },
   {
     id: "gpt-5-codex",
     label: "GPT-5-Codex",
@@ -86,7 +100,9 @@ const MODEL_PRESETS = [
   },
 ];
 
-const codex = new Codex();
+const codex = new Codex(
+  CODEX_PATH_OVERRIDE ? { codexPathOverride: CODEX_PATH_OVERRIDE } : {},
+);
 const inMemoryThreads = new Map();
 const persistedThreadIds = await loadState();
 const saveQueue = createSaveQueue();
@@ -406,7 +422,7 @@ await new Promise((resolve) => {
 function normalizeReasoning(value) {
   if (!value) return null;
   const lowered = String(value).toLowerCase();
-  if (["low", "medium", "high"].includes(lowered)) {
+  if (["minimal", "low", "medium", "high", "xhigh"].includes(lowered)) {
     return lowered;
   }
   return null;
@@ -549,9 +565,16 @@ function resolveModelAndReasoning({ model, reasoning }) {
   const split = String(model).toLowerCase().split(":");
   const modelId = split[0];
   const appendedReasoning = split[1];
-  const modelPreset = getModelPreset(modelId) ?? getModelPreset(DEFAULT_MODEL);
+  const modelPreset = getModelPreset(modelId);
 
   const requestedReasoning = normalizeReasoning(reasoning ?? appendedReasoning);
+  if (!modelPreset) {
+    return {
+      resolvedModel: modelId,
+      resolvedReasoning: requestedReasoning ?? DEFAULT_REASONING,
+    };
+  }
+
   const allowedReasoning =
     requestedReasoning &&
     modelPreset?.reasonings?.some((r) => r.level === requestedReasoning)
