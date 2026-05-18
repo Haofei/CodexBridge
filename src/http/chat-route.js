@@ -28,7 +28,6 @@ import {
 } from "../chat/tools.js";
 import { resolveModelAndReasoning } from "../models.js";
 import {
-  createChatStreamLogger,
   logChatComplete,
   logChatError,
   logChatExchange,
@@ -199,11 +198,6 @@ export function createChatRouter({
     });
 
     if (stream) {
-      const streamLogger = createChatStreamLogger({
-        messages: normalizedMessages,
-        maxTextChars: config.logMaxTextChars,
-      });
-      streamLogger.start();
       if (config.logRequests) {
         logRunPayload(
           "runStreamed payload",
@@ -230,14 +224,12 @@ export function createChatRouter({
         toolContext,
         persistThreadIdIfNeeded: threadStore.persistThreadIdIfNeeded,
         extractAssistantResponse,
-        onTextDelta: (delta) => {
-          streamLogger.writeDelta(delta);
-        },
         onComplete: (result) => {
-          if (toolContext.enabled) {
-            streamLogger.writeMessage(result.message);
-          }
-          streamLogger.close();
+          logChatExchange({
+            messages: normalizedMessages,
+            message: result.message,
+            maxTextChars: config.logMaxTextChars,
+          });
           logChatComplete({
             requestId,
             sessionId,
@@ -246,7 +238,6 @@ export function createChatRouter({
           });
         },
         onError: (error) => {
-          streamLogger.close();
           logChatError({
             requestId,
             sessionId,

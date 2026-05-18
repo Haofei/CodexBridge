@@ -21,7 +21,6 @@ export async function handleStreamResponse({
   onComplete,
   onError,
   onThinking,
-  onTextDelta,
 }) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -139,9 +138,6 @@ export async function handleStreamResponse({
         if (text.length > bufferedText.length) {
           const deltaContent = text.slice(bufferedText.length);
           bufferedText = text;
-          if (typeof onTextDelta === "function") {
-            onTextDelta(deltaContent);
-          }
           sendDelta({ content: deltaContent });
         }
       }
